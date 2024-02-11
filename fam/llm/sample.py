@@ -100,41 +100,36 @@ class Model:
         )
 
     def _init_model(self):
-        if self.config.init_from == "resume":
-            # init from a model saved in a specific directory
-            checkpoint = torch.load(self.config.ckpt_path, map_location=self.config.device)
-            self.vocab_sizes = checkpoint["model_args"]["vocab_sizes"]
+    if self.config.init_from == "resume":
+        # init from a model saved in a specific directory
+        checkpoint = torch.load(self.config.ckpt_path, map_location=self.config.device)
+        self.vocab_sizes = checkpoint["model_args"]["vocab_sizes"]
 
-            self.load_meta = False
-            self.speaker_cond = False
+        self.load_meta = False
+        self.speaker_cond = False
 
-            if "config" in checkpoint:
-                self.checkpoint_config = checkpoint["config"]
+        if "config" in checkpoint:
+            self.checkpoint_config = checkpoint["config"]
+            if "causal" in self.checkpoint_config:
+                self.speaker_cond = self.checkpoint_config.get("speaker_cond", False)
+                self.meta = checkpoint.get("meta", {})
+                if self.speaker_cond:
+                    self.load_meta = True
+                    self.speaker_emb_size = self.meta.get("speaker_emb_size", None)
 
-                self.meta = checkpoint["meta"]
-                load_meta = True
+        model_args = checkpoint["model_args"]
+        if "causal" in self.checkpoint_config and not self.checkpoint_config["causal"]:
+            self._encodec_ctx_window = model_args["block_size"]
 
-            if load_meta:
-                self.use_bpe_tokenizer = "stoi" not in self.meta or "itos" not in self.meta
-                self.speaker_cond = self.meta.get("speaker_cond")
+        gptconf = GPTConfig(**model_args)
 
-            if self.speaker_cond:
-                speaker_emb_size = self.meta["speaker_emb_size"]
-
-            model_args = checkpoint["model_args"]
-            if "causal" in self.checkpoint_config and self.checkpoint_config["causal"] is False:
-                self._encodec_ctx_window = model_args["block_size"]
-
-            gptconf = GPTConfig(**model_args)
-
-            # TODO: rename `speaker_emb_dim` to `speaker_emb_size`.
-            self.model = GPT(gptconf, speaker_emb_dim=speaker_emb_size if self.speaker_cond else None)
-            state_dict = checkpoint["model"]
-            unwanted_prefix = "_orig_mod."
-            for k, v in list(state_dict.items()):
-                if k.startswith(unwanted_prefix):
-                    state_dict[k[len(unwanted_prefix) :]] = state_dict.pop(k)
-            self.model.load_state_dict(state_dict)
+        self.model = GPT(gptconf, speaker_emb_dim=self.speaker_emb_size if self.speaker_cond else None)
+        state_dict = checkpoint["model"]
+        unwanted_prefix = "_orig_mod."
+        for k, v in list(state_dict.items()):
+            if k.startswith(unwanted_prefix):
+                state_dict[k[len(unwanted_prefix):]] = state_dict.pop(k)
+        self.model.load_state_dict(state_dict)
 
         # model
         self.model.eval()
