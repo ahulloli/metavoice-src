@@ -99,70 +99,74 @@ class Model:
             data_adapter_fn=data_adapter_fn,
         )
 
-    def _init_model(self):
-        if self.config.init_from == "resume":
-            # init from a model saved in a specific directory
-            checkpoint = torch.load(self.config.ckpt_path, map_location=self.config.device)
-            self.vocab_sizes = checkpoint["model_args"]["vocab_sizes"]
+  def _init_model(self):
+    load_meta = False  # Initialize load_meta variable
 
-            self.load_meta = False
-            self.speaker_cond = False
+    if self.config.init_from == "resume":
+        # init from a model saved in a specific directory
+        checkpoint = torch.load(self.config.ckpt_path, map_location=self.config.device)
+        self.vocab_sizes = checkpoint["model_args"]["vocab_sizes"]
 
-            if "config" in checkpoint:
-                self.checkpoint_config = checkpoint["config"]
+        self.load_meta = False
+        self.speaker_cond = False
 
-                self.meta = checkpoint["meta"]
-                load_meta = True
+        if "config" in checkpoint:
+            self.checkpoint_config = checkpoint["config"]
 
-            if load_meta:
-                self.use_bpe_tokenizer = "stoi" not in self.meta or "itos" not in self.meta
-                self.speaker_cond = self.meta.get("speaker_cond")
+            self.meta = checkpoint["meta"]
+            load_meta = True
 
-            if self.speaker_cond:
-                speaker_emb_size = self.meta["speaker_emb_size"]
+        if load_meta:
+            self.use_bpe_tokenizer = "stoi" not in self.meta or "itos" not in self.meta
+            self.speaker_cond = self.meta.get("speaker_cond")
+            self.speaker_emb_size = self.meta.get("speaker_emb_size", None)  # Ensure speaker_emb_size is defined
 
-            model_args = checkpoint["model_args"]
-            if "causal" in self.checkpoint_config and self.checkpoint_config["causal"] is False:
-                self._encodec_ctx_window = model_args["block_size"]
+        model_args = checkpoint["model_args"]
+        if "causal" in self.checkpoint_config and self.checkpoint_config["causal"] is False:
+            self._encodec_ctx_window = model_args["block_size"]
 
-            gptconf = GPTConfig(**model_args)
+        gptconf = GPTConfig(**model_args)
 
-            # TODO: rename `speaker_emb_dim` to `speaker_emb_size`.
-            self.model = GPT(gptconf, speaker_emb_dim=speaker_emb_size if self.speaker_cond else None)
-            state_dict = checkpoint["model"]
-            unwanted_prefix = "_orig_mod."
-            for k, v in list(state_dict.items()):
-                if k.startswith(unwanted_prefix):
-                    state_dict[k[len(unwanted_prefix) :]] = state_dict.pop(k)
-            self.model.load_state_dict(state_dict)
+        # Rename `speaker_emb_dim` to `speaker_emb_size`
+        self.model = GPT(gptconf, speaker_emb_dim=self.speaker_emb_size if self.speaker_cond else None)
+        state_dict = checkpoint["model"]
+        unwanted_prefix = "_orig_mod."
+        for k, v in list(state_dict.items()):
+            if k.startswith(unwanted_prefix):
+                state_dict[k[len(unwanted_prefix) :]] = state_dict.pop(k)
+        self.model.load_state_dict(state_dict)
 
-        # model
-        self.model.eval()
-        self.model.to(self.config.device)
+    # model
+    self.model.eval()
+    self.model.to(self.config.device)
 
-        if self.config.compile:
-            from einops._torch_specific import allow_ops_in_compiled_graph
+    # Handle model compilation
+    if self.config.compile:
+        # Assuming `torch.compile` method is available
+        from einops._torch_specific import allow_ops_in_compiled_graph
 
-            allow_ops_in_compiled_graph()
-            self.model = torch.compile(self.model)  # type: ignore
+        allow_ops_in_compiled_graph()
+        self.model = torch.compile(self.model)  # type: ignore
 
-        if self.use_kv_cache is not None:
-            if "causal" in self.checkpoint_config and self.checkpoint_config["causal"] is False:
-                raise Exception("kv_cache not supported for non-causal models!")
+    # Handle key-value cache
+    if self.use_kv_cache is not None:
+        if hasattr(self, 'checkpoint_config') and "causal" in self.checkpoint_config and self.checkpoint_config["causal"] is False:
+            raise Exception("kv_cache not supported for non-causal models!")
 
-            if self.use_kv_cache == "flash_decoding":
-                self.model.enable_kv_cache()
-                for block in self.model.transformer.h:
-                    block.attn.attn_kernel_type = "fd"
-            elif self.use_kv_cache == "vanilla":
-                for block in self.model.transformer.h:
-                    if block.attn.attn_kernel_type != "fa2":
-                        raise Exception(
-                            f"kv_cache only supported for flash attention 2 but found {block.attn.attn_kernel_type} inside model!"
-                        )
-                self.model.enable_kv_cache()
-            else:
-                raise NotImplementedError(f"kv_cache type {self.use_kv_cache} not implemented!")
+        if self.use_kv_cache == "flash_decoding":
+            self.model.enable_kv_cache()
+            for block in self.model.transformer.h:
+                block.attn.attn_kernel_type = "fd"
+        elif self.use_kv_cache == "vanilla":
+            for block in self.model.transformer.h:
+                if block.attn.attn_kernel_type != "fa2":
+                    raise Exception(
+                        f"kv_cache only supported for flash attention 2 but found {block.attn.attn_kernel_type} inside model!"
+                    )
+            self.model.enable_kv_cache()
+        else:
+            raise NotImplementedError(f"kv_cache type {self.use_kv_cache} not implemented!")
+
 
     def causal_sample(
         self,
